@@ -18,18 +18,100 @@ class ImageArchiveManifestSummary:
     "docker image save some:tag > some.tar" command.
     """
 
-    def __init__(self, image_id: str, repo_tags: list[str]) -> None:
+    def __init__(self, image_id: str, repo_tags: list[str], manifest_id: str | None = None) -> None:
         """
-        :param image_id:  File name portion of Config entry, e.g. abcde12345 from abcde12345.json
-        :param repo_tags  Docker image names, e.g. ["hello-world:latest"]
+        :param image_id:    File name portion of Config entry, e.g. abcde12345 from abcde12345.json
+        :param repo_tags    Docker image names, e.g. ["hello-world:latest"]
+        :param manifest_id  OCI manifest digest (without sha256: prefix), populated from index.json
+                            for Docker 25+ archives. Equals the Docker 29+ image ID.
         """
 
         self.image_id = image_id
         self.repo_tags = repo_tags
+        self.manifest_id = manifest_id
 
 
 class ImageArchiveInvalidException(Exception):
     pass
+
+
+def _enrich_with_oci_manifest_ids(
+    tf: "tarfile.TarFile", result: "list[ImageArchiveManifestSummary]"
+) -> None:
+    """
+    Try to read index.json from the archive and correlate OCI manifest digests
+    to ImageArchiveManifestSummary entries via config.digest.
+
+    Sets manifest_id on matched entries. This enables idempotency checks with
+    Docker 29+, which uses OCI manifest digests as image IDs instead of config
+    blob hashes.
+
+    Handles both single-platform manifests and OCI image indexes (one level of
+    nesting), since Docker 29 stores the image index digest as the image ID.
+    All errors are silently ignored — this is best-effort enrichment.
+    """
+    # Map config_hash → list of summaries (multiple entries can share the same image)
+    by_config: dict[str, list[ImageArchiveManifestSummary]] = {}
+    for s in result:
+        by_config.setdefault(s.image_id, []).append(s)
+
+    def read_blob(digest: str) -> "dict | None":
+        if not digest.startswith("sha256:"):
+            return None
+        try:
+            reader = tf.extractfile(f"blobs/sha256/{digest[len('sha256:'):]}")
+            if reader is None:
+                return None
+            with reader as ef:
+                return json.load(ef)
+        except Exception:  # pylint: disable=broad-exception-caught
+            return None
+
+    def try_match_manifest(blob: dict, top_digest: str) -> bool:
+        """If blob is an image manifest with a matching config.digest, set manifest_id on all
+        matching summaries and return True. Multiple summaries can share the same image_id
+        (e.g., same image saved by ID and by name)."""
+        config_digest = blob.get("config", {}).get("digest", "")
+        if config_digest.startswith("sha256:"):
+            config_hash = config_digest[len("sha256:"):]
+            summaries = by_config.get(config_hash, [])
+            for summary in summaries:
+                if summary.manifest_id is None:
+                    summary.manifest_id = top_digest[len("sha256:"):]
+            return bool(summaries)
+        return False
+
+    # Read index.json
+    try:
+        reader = tf.extractfile("index.json")
+        if reader is None:
+            return
+        with reader as ef:
+            index = json.load(ef)
+    except Exception:  # pylint: disable=broad-exception-caught
+        return
+
+    for entry in index.get("manifests", []):
+        top_digest = entry.get("digest", "")
+        if not top_digest.startswith("sha256:"):
+            continue
+
+        blob = read_blob(top_digest)
+        if blob is None:
+            continue
+
+        # Case 1: direct image manifest (has config.digest)
+        if try_match_manifest(blob, top_digest):
+            continue
+
+        # Case 2: OCI image index (has nested manifests[] but no config).
+        # Docker 29 exposes the image index digest as the image ID, so we use
+        # top_digest as the manifest_id even when matching via a child manifest.
+        for sub_entry in blob.get("manifests", []):
+            sub_digest = sub_entry.get("digest", "")
+            sub_blob = read_blob(sub_digest)
+            if sub_blob is not None:
+                try_match_manifest(sub_blob, top_digest)
 
 
 def api_image_id(archive_image_id: str) -> str:
@@ -123,6 +205,7 @@ def load_archived_image_manifest(
                             image_id=image_id, repo_tags=repo_tags
                         )
                     )
+                _enrich_with_oci_manifest_ids(tf, result)
                 return result
 
             except ImageArchiveInvalidException:

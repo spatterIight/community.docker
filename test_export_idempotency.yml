@@ -1,0 +1,111 @@
+---
+- name: Test docker_image_export idempotency with multi-arch images
+  hosts: localhost
+  gather_facts: false
+
+  vars:
+    test_image: "spatterlight/kind-molecule:latest" # Single-arch image
+    # test_image: "docker.io/library/busybox:latest" # Multi-arch image
+    test_platform: "linux/amd64"
+    test_archive: "/tmp/ansible_docker_export_idempotency_test.tar"
+
+  tasks:
+
+    - name: Run scenarios with cleanup
+      block:
+        # -----------------------------------------------------------------------
+        # Scenario 1 — no 'platform' param
+        # -----------------------------------------------------------------------
+        - name: "Scenario 1: Pull multi-arch image (no platform filter)"
+          community.docker.docker_image:
+            name: "{{ test_image }}"
+            source: pull
+            force_source: true
+
+        - name: "Scenario 1: Remove archive before first export"
+          ansible.builtin.file:
+            path: "{{ test_archive }}"
+            state: absent
+
+        - name: "Scenario 1: Export image (first run — must be changed)"
+          community.docker.docker_image_export:
+            name: "{{ test_image }}"
+            path: "{{ test_archive }}"
+          register: export_result_1a
+
+        - name: "Scenario 1: Assert first export was changed"
+          ansible.builtin.assert:
+            that: export_result_1a is changed
+            fail_msg: "First export was unexpectedly not changed"
+
+        - name: "Scenario 1: Export image (second run — must NOT be changed)"
+          community.docker.docker_image_export:
+            name: "{{ test_image }}"
+            path: "{{ test_archive }}"
+          register: export_result_1b
+
+        - name: "Scenario 1: Show result msg on idempotency failure"
+          ansible.builtin.debug:
+            msg: "{{ export_result_1b.msg | default('(no msg)') }}"
+          when: export_result_1b is changed
+
+        - name: "Scenario 1: Assert second export was NOT changed (idempotency)"
+          ansible.builtin.assert:
+            that: export_result_1b is not changed
+            fail_msg: >-
+              Idempotency failure (no platform): second export was changed.
+              msg={{ export_result_1b.msg | default('(no msg)') }}
+
+        # -----------------------------------------------------------------------
+        # Scenario 2 — with 'platform' param
+        # -----------------------------------------------------------------------
+        - name: "Scenario 2: Pull multi-arch image with platform filter"
+          community.docker.docker_image:
+            name: "{{ test_image }}"
+            source: pull
+            force_source: true
+            pull:
+              platform: "{{ test_platform }}"
+
+        - name: "Scenario 2: Remove archive before first export"
+          ansible.builtin.file:
+            path: "{{ test_archive }}"
+            state: absent
+
+        - name: "Scenario 2: Export image with platform (first run — must be changed)"
+          community.docker.docker_image_export:
+            name: "{{ test_image }}"
+            path: "{{ test_archive }}"
+            platform: "{{ test_platform }}"
+          register: export_result_2a
+
+        - name: "Scenario 2: Assert first export was changed"
+          ansible.builtin.assert:
+            that: export_result_2a is changed
+            fail_msg: "First export (with platform) was unexpectedly not changed"
+
+        - name: "Scenario 2: Export image with platform (second run — must NOT be changed)"
+          community.docker.docker_image_export:
+            name: "{{ test_image }}"
+            path: "{{ test_archive }}"
+            platform: "{{ test_platform }}"
+          register: export_result_2b
+
+        - name: "Scenario 2: Show result msg on idempotency failure"
+          ansible.builtin.debug:
+            msg: "{{ export_result_2b.msg | default('(no msg)') }}"
+          when:
+            - export_result_2b is changed
+
+        - name: "Scenario 2: Assert second export was NOT changed (idempotency)"
+          ansible.builtin.assert:
+            that: export_result_2b is not changed
+            fail_msg: >-
+              Idempotency failure (with platform): second export was changed.
+              msg={{ export_result_2b.msg | default('(no msg)') }}
+
+      always:
+        - name: "Cleanup: Remove test archive"
+          ansible.builtin.file:
+            path: "{{ test_archive }}"
+            state: absent

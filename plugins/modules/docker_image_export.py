@@ -27,13 +27,7 @@ attributes:
   diff_mode:
     support: none
   idempotent:
-    support: partial
-    details:
-      - Whether the module is idempotent depends on the storage API used for images,
-        which determines how the image ID is computed. The idempotency check needs
-        that the image ID equals the ID stored in archive's C(manifest.json).
-        This seemed to have worked fine with the default storage backend up to Docker 28,
-        but seems to have changed in Docker 29.
+    support: full
 
 options:
   names:
@@ -126,6 +120,23 @@ from ansible_collections.community.docker.plugins.module_utils._util import (
 )
 
 
+def _canonical_name_from_repo_tags(repo_tags: list[str], requested_tag: str) -> str | None:
+    """
+    Return the single RepoTag whose suffix matches ``:<requested_tag>``, if exactly one exists.
+
+    Docker normalises image names at pull time (e.g. ``docker.io/library/busybox`` →
+    ``busybox``), so ``image["RepoTags"]`` already contains the canonical form that will
+    appear in the archive's ``manifest.json``.  By finding the matching tag here we avoid
+    hard-coding any registry-specific prefix rules.
+
+    Returns ``None`` when zero or more than one tag matches; the caller should fall back
+    to the user-provided name in that case.
+    """
+    suffix = f":{requested_tag}"
+    matches = [t for t in repo_tags if t.endswith(suffix)]
+    return matches[0] if len(matches) == 1 else None
+
+
 class ImageExportManager(DockerBaseClass):
     def __init__(self, client: AnsibleDockerClient) -> None:
         super().__init__()
@@ -172,21 +183,38 @@ class ImageExportManager(DockerBaseClass):
             self.log(f"Unable to extract manifest summary from archive: {exc}")
             return "Overwriting an unreadable archive file"
 
-        left_names = list(self.names)
-        for archived_image in archived_images:
-            found = False
-            for i, name in enumerate(left_names):
-                if (
-                    name["id"] == api_image_id(archived_image.image_id)
-                    and [name["joined"]] == archived_image.repo_tags
-                ):
-                    del left_names[i]
-                    found = True
-                    break
-            if not found:
-                return f"Overwriting archive since it contains unexpected image {archived_image.image_id} named {', '.join(archived_image.repo_tags)}"
-        if left_names:
-            return f"Overwriting archive since it is missing image(s) {', '.join([name['joined'] for name in left_names])}"
+        # Use bipartite matching: each archive entry must be covered by at least one
+        # requested name, and each requested name must be covered by at least one
+        # archive entry. This correctly handles the same image appearing multiple
+        # times in a request (e.g., by both ID and name).
+        matches: list[tuple[int, int]] = []  # (archive_idx, name_idx)
+        for ai, archived_image in enumerate(archived_images):
+            archived_repo_tags = archived_image.repo_tags or []
+            for ni, name in enumerate(self.names):
+                id_matches = name["id"] == api_image_id(archived_image.image_id) or (
+                    archived_image.manifest_id is not None
+                    and name["id"] == api_image_id(archived_image.manifest_id)
+                )
+                # For requests by image ID (no repo name), repo tags are irrelevant —
+                # only the image ID needs to match. For requests by name, compare the
+                # canonical name Docker stored in RepoTags (set in run()) against the
+                # archive's RepoTags — both come from Docker so no prefix rules needed.
+                tags_match = "name" not in name or (
+                    [name["canonical_joined"]] == archived_repo_tags
+                )
+                if id_matches and tags_match:
+                    matches.append((ai, ni))
+
+        matched_archive_idxs = {ai for ai, _ in matches}
+        for ai, archived_image in enumerate(archived_images):
+            if ai not in matched_archive_idxs:
+                archived_repo_tags = archived_image.repo_tags or []
+                return f"Overwriting archive since it contains unexpected image {archived_image.image_id} named {', '.join(archived_repo_tags)}"
+
+        matched_name_idxs = {ni for _, ni in matches}
+        missing = [self.names[ni] for ni in range(len(self.names)) if ni not in matched_name_idxs]
+        if missing:
+            return f"Overwriting archive since it is missing image(s) {', '.join([name['joined'] for name in missing])}"
 
         return None
 
@@ -249,6 +277,15 @@ class ImageExportManager(DockerBaseClass):
 
             # Will have a 'sha256:' prefix
             name["id"] = image["Id"]
+
+            # Determine the canonical name Docker will store in the archive's RepoTags.
+            # Docker normalises names at pull time (e.g. docker.io/library/busybox →
+            # busybox), so we read it back from RepoTags rather than guessing the rules.
+            if "name" in name:
+                canonical = _canonical_name_from_repo_tags(
+                    image.get("RepoTags") or [], name["tag"]
+                )
+                name["canonical_joined"] = canonical if canonical is not None else name["joined"]
 
         results = {
             "changed": False,

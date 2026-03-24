@@ -679,7 +679,13 @@ class ImageManager(DockerBaseClass):
         if archived is None:
             return build_msg("since none present")
         if (
-            current_image_id == api_image_id(archived.image_id)
+            (
+                current_image_id == api_image_id(archived.image_id)
+                or (
+                    archived.manifest_id is not None
+                    and current_image_id == api_image_id(archived.manifest_id)
+                )
+            )
             and [current_image_name] == archived.repo_tags
         ):
             return None
@@ -709,6 +715,13 @@ class ImageManager(DockerBaseClass):
         else:
             image = self.client.find_image(name=name, tag=tag)
             image_name = f"{name}:{tag}"
+            # Use Docker's canonical form for the archive comparison.
+            # Docker normalises names at pull time (e.g. docker.io/library/busybox →
+            # busybox), so read it back from RepoTags rather than guessing prefix rules.
+            suffix = f":{tag}"
+            matches = [t for t in (image.get("RepoTags") or []) if t.endswith(suffix)]
+            if len(matches) == 1:
+                image_name = matches[0]
 
         if not image:
             self.log(f"archive image: image {image_name} not found")

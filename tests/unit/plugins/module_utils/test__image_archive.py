@@ -13,11 +13,13 @@ from ansible_collections.community.docker.plugins.module_utils._image_archive im
     ImageArchiveInvalidException,
     api_image_id,
     archived_image_manifest,
+    load_archived_image_manifest,
 )
 
 from ..test_support.docker_image_archive_stubbing import (
     write_imitation_archive,
     write_imitation_archive_with_manifest,
+    write_imitation_oci_archive,
     write_irrelevant_tar,
 )
 
@@ -95,3 +97,31 @@ def test_archived_image_manifest_raises_when_manifest_missing_id(
     except ImageArchiveInvalidException as e:
         assert isinstance(e.__cause__, KeyError)
         assert "Config" in str(e.__cause__)
+
+
+def test_load_archived_manifest_populates_manifest_id_from_oci_index(
+    tar_file_name: str,
+) -> None:
+    config_hash = "bf756fb1ae65adf866bd8c456593cd24beb6a0a061dedf42b26a993176745f6b"
+    manifest_hash = "90659bf80b44ce6be8234e6ff90a1ac34acbeb826903b02cfa0da11c82cbc042"
+
+    write_imitation_oci_archive(tar_file_name, config_hash, manifest_hash, ["hello-world:latest"])
+
+    results = load_archived_image_manifest(tar_file_name)
+
+    assert results is not None
+    assert len(results) == 1
+    assert results[0].image_id == config_hash
+    assert results[0].manifest_id == manifest_hash
+
+
+def test_load_archived_manifest_manifest_id_is_none_without_oci(
+    tar_file_name: str,
+) -> None:
+    write_imitation_archive(tar_file_name, "abcde12345", ["foo:latest"])
+
+    results = load_archived_image_manifest(tar_file_name)
+
+    assert results is not None
+    assert len(results) == 1
+    assert results[0].manifest_id is None

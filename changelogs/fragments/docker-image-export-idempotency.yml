@@ -1,0 +1,6 @@
+bugfixes:
+  - docker_image, docker_image_export - fix idempotency on Docker 29+ by reading the OCI
+    manifest digest from the archive's ``index.json`` and using it as an alternative image
+    ID match. Docker 29 changed the default storage backend so that ``docker inspect`` now
+    returns the OCI manifest digest as the image ID instead of the config blob hash stored
+    in the archive's ``manifest.json`` (https://github.com/ansible-collections/community.docker/pull/1199).

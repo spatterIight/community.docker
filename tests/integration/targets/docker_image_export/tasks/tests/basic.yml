@@ -68,6 +68,23 @@
         manifest_json_images: "{{ item.2 | map(attribute='Config') | map('regex_replace', '.json$', '') | map('regex_replace', '^blobs/sha256/', '') | sort }}"
         export_image_ids: "{{ item.1 | map('regex_replace', '^sha256:', '') | unique | sort }}"
       when: docker_cli_version is version("29.0.0", "<")
-      # Apparently idempotency no longer works with the default storage backend
-      # in Docker 29.0.0.
-      # https://github.com/ansible-collections/community.docker/pull/1199
+      # In Docker 29+ the image ID returned by the API is the OCI manifest digest,
+      # not the config blob hash encoded in manifest.json. The basic assertion above
+      # compares those two values directly; the idempotency check below covers Docker 29+.
+
+    - name: Re-export same archives (idempotency check — all Docker versions)
+      community.docker.docker_image_export:
+        names: "{{ item.images }}"
+        path: "{{ remote_tmp_dir }}/{{ item.file }}"
+      loop: "{{ image_tasks }}"
+      loop_control:
+        label: "{{ item.file }}"
+      register: result_reexport
+
+    - name: Assert all re-exports are idempotent
+      ansible.builtin.assert:
+        that:
+          - result_reexport.results | selectattr('changed') | list | length == 0
+        fail_msg: >-
+          Idempotency failure: {{ result_reexport.results | selectattr('changed')
+          | map(attribute='item') | map(attribute='file') | list }} changed on re-run
