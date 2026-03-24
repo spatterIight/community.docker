@@ -18,17 +18,21 @@ class ImageArchiveManifestSummary:
     "docker image save some:tag > some.tar" command.
     """
 
-    def __init__(self, image_id: str, repo_tags: list[str], manifest_id: str | None = None) -> None:
+    def __init__(self, image_id: str, repo_tags: list[str], manifest_id: str | None = None, platform: str | None = None) -> None:
         """
         :param image_id:    File name portion of Config entry, e.g. abcde12345 from abcde12345.json
         :param repo_tags    Docker image names, e.g. ["hello-world:latest"]
         :param manifest_id  OCI manifest digest (without sha256: prefix), populated from index.json
                             for Docker 25+ archives. Equals the Docker 29+ image ID.
+        :param platform     Raw platform string from the config blob, e.g. "linux/amd64".
+                            Populated only for Docker 25+ (OCI) archives where
+                            blobs/sha256/<config_hash> is present.
         """
 
         self.image_id = image_id
         self.repo_tags = repo_tags
         self.manifest_id = manifest_id
+        self.platform = platform
 
 
 class ImageArchiveInvalidException(Exception):
@@ -112,6 +116,47 @@ def _enrich_with_oci_manifest_ids(
             sub_blob = read_blob(sub_digest)
             if sub_blob is not None:
                 try_match_manifest(sub_blob, top_digest)
+
+
+def _enrich_with_platform(
+    tf: "tarfile.TarFile", result: "list[ImageArchiveManifestSummary]"
+) -> None:
+    """
+    For each entry in ``result``, try to read the OCI image config blob at
+    ``blobs/sha256/<image_id>`` and extract ``os`` / ``architecture`` / ``variant``
+    into ``summary.platform`` (e.g. ``"linux/amd64"``).
+
+    Used by docker_image_export for platform-specific idempotency checks.
+    All errors are silently ignored — best-effort enrichment.
+
+    Only Docker 25+ (OCI) archives contain ``blobs/sha256/``; for older archives
+    the config blob is stored as ``<image_id>.json`` and has no guaranteed platform
+    fields. Since ``platform`` requires Docker API >= 1.48 (Docker 28+), the OCI
+    layout is always present when platform filtering is in use.
+    """
+    for summary in result:
+        try:
+            reader = tf.extractfile(f"blobs/sha256/{summary.image_id}")
+            if reader is None:
+                continue
+            with reader as ef:
+                config = json.load(ef)
+        except Exception:  # pylint: disable=broad-exception-caught
+            continue
+
+        os_str = config.get("os") or ""
+        arch_str = config.get("architecture") or ""
+        variant_str = config.get("variant") or ""
+
+        if not os_str or not arch_str:
+            continue
+
+        # Store the raw value; _Platform.parse_platform_string normalises aliases
+        # (aarch64 → arm64, x86_64 → amd64 etc.) at comparison time in the caller.
+        parts = [os_str, arch_str]
+        if variant_str:
+            parts.append(variant_str)
+        summary.platform = "/".join(parts)
 
 
 def api_image_id(archive_image_id: str) -> str:
@@ -206,6 +251,7 @@ def load_archived_image_manifest(
                         )
                     )
                 _enrich_with_oci_manifest_ids(tf, result)
+                _enrich_with_platform(tf, result)
                 return result
 
             except ImageArchiveInvalidException:

@@ -195,6 +195,14 @@ class ImageExportManager(DockerBaseClass):
             self.log(f"Unable to extract manifest summary from archive: {exc}")
             return "Overwriting an unreadable archive file"
 
+        # Parse the requested platform once (if specified) for use in the loop below.
+        requested_platform: _Platform | None = None
+        if self.platform:
+            try:
+                requested_platform = _Platform.parse_platform_string(self.platform)
+            except ValueError:
+                pass  # already validated in __init__; treat as no platform filter
+
         # Use bipartite matching: each archive entry must be covered by at least one
         # requested name, and each requested name must be covered by at least one
         # archive entry. This correctly handles the same image appearing multiple
@@ -203,10 +211,31 @@ class ImageExportManager(DockerBaseClass):
         for ai, archived_image in enumerate(archived_images):
             archived_repo_tags = archived_image.repo_tags or []
             for ni, name in enumerate(self.names):
-                id_matches = name["id"] == api_image_id(archived_image.image_id) or (
-                    archived_image.manifest_id is not None
-                    and name["id"] == api_image_id(archived_image.manifest_id)
-                )
+                if "name" not in name:
+                    # ID-based request: compare hashes directly (reliable on all Docker versions).
+                    id_matches = name["id"] == api_image_id(archived_image.image_id) or (
+                        archived_image.manifest_id is not None
+                        and name["id"] == api_image_id(archived_image.manifest_id)
+                    )
+                elif requested_platform is not None and archived_image.platform is not None:
+                    # Name-based request with platform filter: compare platforms instead of
+                    # image IDs. On Docker 29, inspect returns the image-index digest which
+                    # never matches the per-platform manifest hash stored in the archive.
+                    # Known limitation: image content updates are not detected; use force=true.
+                    try:
+                        id_matches = (
+                            _Platform.parse_platform_string(archived_image.platform)
+                            == requested_platform
+                        )
+                    except ValueError:
+                        id_matches = False
+                else:
+                    # Name-based request without platform, or platform not extractable from
+                    # archive (old format): fall back to existing image-ID hash comparison.
+                    id_matches = name["id"] == api_image_id(archived_image.image_id) or (
+                        archived_image.manifest_id is not None
+                        and name["id"] == api_image_id(archived_image.manifest_id)
+                    )
                 # For requests by image ID (no repo name), repo tags are irrelevant —
                 # only the image ID needs to match. For requests by name, compare the
                 # canonical name Docker stored in RepoTags (set in run()) against the

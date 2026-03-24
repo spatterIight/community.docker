@@ -4,8 +4,8 @@
   gather_facts: false
 
   vars:
-    test_image: "spatterlight/kind-molecule:latest" # Single-arch image
-    # test_image: "docker.io/library/busybox:latest" # Multi-arch image
+    # test_image: "spatterlight/kind-molecule:latest" # Single-arch image
+    test_image: "docker.io/library/busybox:latest" # Multi-arch image
     test_platform: "linux/amd64"
     test_archive: "/tmp/ansible_docker_export_idempotency_test.tar"
 

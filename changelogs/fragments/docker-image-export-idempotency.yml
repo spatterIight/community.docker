@@ -4,3 +4,9 @@ bugfixes:
     ID match. Docker 29 changed the default storage backend so that ``docker inspect`` now
     returns the OCI manifest digest as the image ID instead of the config blob hash stored
     in the archive's ``manifest.json`` (https://github.com/ansible-collections/community.docker/pull/1199).
+  - docker_image_export - fix idempotency when O(platform) is specified. Docker 29 returns
+    the multi-arch image index digest as the image ID, which never matches the per-platform
+    manifest hash in a platform-filtered archive. The fix reads the platform from the config
+    blob inside the archive and compares it against the requested platform instead of
+    comparing image IDs. Known limitation: image content updates are not detected for
+    platform-specific exports; use O(force=true) to force a re-export.

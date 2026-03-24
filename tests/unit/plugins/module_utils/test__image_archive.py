@@ -125,3 +125,67 @@ def test_load_archived_manifest_manifest_id_is_none_without_oci(
     assert results is not None
     assert len(results) == 1
     assert results[0].manifest_id is None
+
+
+def test_load_archived_manifest_populates_platform_from_config_blob(
+    tar_file_name: str,
+) -> None:
+    config_hash = "bf756fb1ae65adf866bd8c456593cd24beb6a0a061dedf42b26a993176745f6b"
+    manifest_hash = "90659bf80b44ce6be8234e6ff90a1ac34acbeb826903b02cfa0da11c82cbc042"
+
+    write_imitation_oci_archive(
+        tar_file_name, config_hash, manifest_hash, ["busybox:latest"],
+        architecture="amd64", os="linux",
+    )
+
+    results = load_archived_image_manifest(tar_file_name)
+
+    assert results is not None
+    assert len(results) == 1
+    assert results[0].platform == "linux/amd64"
+
+
+def test_load_archived_manifest_populates_platform_with_variant(
+    tar_file_name: str,
+) -> None:
+    config_hash = "aaaa1111" * 8
+    manifest_hash = "bbbb2222" * 8
+
+    write_imitation_oci_archive(
+        tar_file_name, config_hash, manifest_hash, ["myimage:arm"],
+        architecture="arm64", os="linux", variant="v8",
+    )
+
+    results = load_archived_image_manifest(tar_file_name)
+
+    assert results is not None
+    assert len(results) == 1
+    assert results[0].platform == "linux/arm64/v8"
+
+
+def test_load_archived_manifest_platform_is_none_without_oci(
+    tar_file_name: str,
+) -> None:
+    write_imitation_archive(tar_file_name, "abcde12345", ["foo:latest"])
+
+    results = load_archived_image_manifest(tar_file_name)
+
+    assert results is not None
+    assert len(results) == 1
+    assert results[0].platform is None
+
+
+def test_load_archived_manifest_platform_is_none_when_config_missing_fields(
+    tar_file_name: str,
+) -> None:
+    config_hash = "cccc3333" * 8
+    manifest_hash = "dddd4444" * 8
+
+    # No architecture/os kwargs → config blob not written → platform stays None
+    write_imitation_oci_archive(tar_file_name, config_hash, manifest_hash, ["scratch:latest"])
+
+    results = load_archived_image_manifest(tar_file_name)
+
+    assert results is not None
+    assert len(results) == 1
+    assert results[0].platform is None

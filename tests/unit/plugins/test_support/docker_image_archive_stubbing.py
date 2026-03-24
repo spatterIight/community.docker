@@ -52,15 +52,26 @@ def write_imitation_oci_archive(
     config_hash: str,
     manifest_hash: str,
     repo_tags: list[str],
+    *,
+    architecture: str | None = None,
+    os: str | None = None,
+    variant: str | None = None,
 ) -> None:
     """
     Write a Docker 25+/29-style OCI archive containing manifest.json, index.json,
     and the OCI manifest blob under blobs/sha256/.
 
+    When ``architecture`` and ``os`` are provided, also writes a minimal OCI image
+    config blob at ``blobs/sha256/<config_hash>`` so that _enrich_with_platform can
+    extract the platform.
+
     :param file_name:      Name of tar file to create
     :param config_hash:    Fake config blob SHA256 hash (without sha256: prefix)
     :param manifest_hash:  Fake OCI manifest SHA256 hash (without sha256: prefix)
     :param repo_tags:      List of fake image tags
+    :param architecture:   OCI config blob ``architecture`` field (e.g. "amd64")
+    :param os:             OCI config blob ``os`` field (e.g. "linux")
+    :param variant:        OCI config blob ``variant`` field (e.g. "v8"), optional
     """
     manifest_entry = [{"Config": f"blobs/sha256/{config_hash}", "RepoTags": repo_tags}]
     oci_manifest = {
@@ -91,6 +102,12 @@ def write_imitation_oci_archive(
         _add_bytes(tf, "manifest.json", json.dumps(manifest_entry).encode("utf-8"))
         _add_bytes(tf, f"blobs/sha256/{manifest_hash}", oci_manifest_bytes)
         _add_bytes(tf, "index.json", json.dumps(index).encode("utf-8"))
+        if architecture and os:
+            config_blob: dict[str, t.Any] = {"architecture": architecture, "os": os}
+            if variant:
+                config_blob["variant"] = variant
+            _add_bytes(tf, f"blobs/sha256/{config_hash}",
+                       json.dumps(config_blob).encode("utf-8"))
 
 
 def write_irrelevant_tar(file_name: str) -> None:
